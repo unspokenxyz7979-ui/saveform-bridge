@@ -3,15 +3,11 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import re
-import sys
 
 app = Flask(__name__)
 CORS(app)
 
-print("✅ Flask app starting...", file=sys.stderr)
-
 def scrape_saveform(url):
-    print(f"🔍 Scraping: {url}", file=sys.stderr)
     try:
         session = requests.Session()
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -34,33 +30,51 @@ def scrape_saveform(url):
         if not dl_link:
             dl_link = soup2.find("a", href=re.compile(r"\.mp4|download"))
         if dl_link and dl_link.get("href"):
-            print(f"✅ Found link: {dl_link['href']}", file=sys.stderr)
             return dl_link["href"]
         mp4_match = re.search(r'https?://[^\s"\']+\.mp4', response.text)
         if mp4_match:
-            print(f"✅ Found mp4: {mp4_match.group(0)}", file=sys.stderr)
             return mp4_match.group(0)
-        print("❌ No link found", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"❌ Scrape error: {e}", file=sys.stderr)
+        print(f"Saveform error: {e}")
         return None
 
-@app.route("/fetch", methods=["POST"])
-def fetch():
-    print("📥 /fetch called", file=sys.stderr)
-    data = request.get_json()
-    if not data or "url" not in data:
-        return jsonify({"success": False, "error": "URL nahi mila"}), 400
-    video_url = scrape_saveform(data["url"])
-    if video_url:
-        return jsonify({"success": True, "downloadUrl": video_url, "message": "Video link saveform.net se laaya gaya"})
-    else:
-        return jsonify({"success": False, "error": "saveform.net se video nahi mila. Link check karein."}), 404
+def fallback_api(url):
+    """Method 2: Agar saveform.net fail ho toh yeh API use karein"""
+    try:
+        # Yeh API YouTube, Instagram, TikTok, Facebook par kaam karti hai
+        api_url = f"https://api.vevioz.com/api/button/mp4/{url}"
+        response = requests.get(api_url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            video_url = data.get('video') or data.get('url')
+            if video_url:
+                return video_url
+        return None
+    except Exception as e:
+        print(f"Fallback error: {e}")
+        return None
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "alive", "message": "Backend is running. Use POST /fetch with { 'url': '...' }"})
+    return jsonify({"status": "alive", "message": "Backend is running. Use POST /fetch"})
 
-if __name__ == "__main__":
-    app.run(debug=True)
+@app.route("/fetch", methods=["POST"])
+def fetch():
+    data = request.get_json()
+    if not data or "url" not in data:
+        return jsonify({"success": False, "error": "URL nahi mila"}), 400
+    
+    user_url = data["url"]
+    
+    # 1. Pehle saveform.net try karein
+    video_url = scrape_saveform(user_url)
+    if video_url:
+        return jsonify({"success": True, "downloadUrl": video_url, "method": "saveform.net"})
+    
+    # 2. Agar saveform fail ho toh fallback API try karein
+    video_url = fallback_api(user_url)
+    if video_url:
+        return jsonify({"success": True, "downloadUrl": video_url, "method": "Fallback API"})
+    
+    return jsonify({"success": False, "error": "Koi bhi method kaam nahi kiya. Link check karein."}), 404
