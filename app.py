@@ -1,19 +1,22 @@
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import re
 import json
-from urllib.parse import urlparse, parse_qs
+import os
 
 app = Flask(__name__)
 CORS(app)
 
+# ---------- YOUTUBE DIRECT METHOD (Scraping) ----------
 def extract_youtube_video_id(url):
     """YouTube URL se video ID nikaalein"""
     patterns = [
         r'(?:youtube\.com\/watch\?v=)([\w-]+)',
         r'(?:youtu\.be\/)([\w-]+)',
-        r'(?:youtube\.com\/embed\/)([\w-]+)'
+        r'(?:youtube\.com\/embed\/)([\w-]+)',
+        r'(?:youtube\.com\/shorts\/)([\w-]+)'
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -22,56 +25,67 @@ def extract_youtube_video_id(url):
     return None
 
 def get_youtube_video_direct(video_id):
-    """YouTube video ko direct download karein (without any API)"""
+    """YouTube video direct download (without API)"""
     try:
-        # YouTube player page se data nikaalein
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
+        # YouTube oEmbed API (alternative method)
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(oembed_url, headers=headers, timeout=10)
         
-        # YouTube ke player response mein video URLs hote hain
-        # "ytInitialPlayerResponse" JSON nikaalein
-        match = re.search(r'var ytInitialPlayerResponse = ({.*?});', response.text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(1))
-            # Streaming data mein se best quality video URL nikaalein
-            streaming = data.get('streamingData', {})
-            formats = streaming.get('formats', []) + streaming.get('adaptiveFormats', [])
+        if response.status_code == 200:
+            # Agar video exist karti hai toh player page se nikaalein
+            player_url = f"https://www.youtube.com/watch?v={video_id}"
+            player_resp = requests.get(player_url, headers=headers, timeout=15)
             
-            # Sab se high quality wala format choose karein
-            best_url = None
-            best_quality = 0
-            for fmt in formats:
-                if 'url' in fmt and fmt.get('qualityLabel'):
-                    quality = int(fmt['qualityLabel'].replace('p', '')) if fmt['qualityLabel'].replace('p', '').isdigit() else 0
-                    if quality > best_quality:
-                        best_quality = quality
-                        best_url = fmt['url']
-            
-            if best_url:
-                return best_url
+            # ytInitialPlayerResponse JSON nikaalein
+            match = re.search(r'var ytInitialPlayerResponse = ({.*?});', player_resp.text, re.DOTALL)
+            if match:
+                data = json.loads(match.group(1))
+                streaming = data.get('streamingData', {})
+                formats = streaming.get('formats', []) + streaming.get('adaptiveFormats', [])
+                
+                # Sab se high quality wala video URL
+                best_url = None
+                best_quality = 0
+                for fmt in formats:
+                    if 'url' in fmt and fmt.get('qualityLabel'):
+                        quality = int(fmt['qualityLabel'].replace('p', '')) if fmt['qualityLabel'].replace('p', '').isdigit() else 0
+                        if quality > best_quality:
+                            best_quality = quality
+                            best_url = fmt['url']
+                
+                if best_url:
+                    return best_url
         
-        # Agar JSON nahi mila toh alternate method
-        # YouTube ke video page mein "playabilityStatus" check karein
-        playability_match = re.search(r'"playabilityStatus":\s*({.*?})', response.text)
-        if playability_match:
-            status = json.loads(playability_match.group(1))
+        # Agar oEmbed fail ho toh alternate method (player page se)
+        player_url = f"https://www.youtube.com/watch?v={video_id}"
+        player_resp = requests.get(player_url, headers=headers, timeout=15)
+        
+        # "playabilityStatus" check karein
+        status_match = re.search(r'"playabilityStatus":\s*({.*?})', player_resp.text)
+        if status_match:
+            status = json.loads(status_match.group(1))
             if status.get('status') == 'UNPLAYABLE':
                 print("Video unavailable or age-restricted")
                 return None
         
+        # Format URLs nikaalein
+        format_match = re.search(r'"url":"(https?://[^"]+)"', player_resp.text)
+        if format_match:
+            return format_match.group(1)
+        
         return None
     except Exception as e:
-        print(f"YouTube direct error: {e}")
+        print(f"YouTube error: {e}")
         return None
 
-def fallback_saveform(url):
-    """Saveform.net (for Instagram/TikTok)"""
+# ---------- SAVEFORM.NET (Instagram, TikTok, Facebook) ----------
+def scrape_saveform(url):
     try:
         session = requests.Session()
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        
+        # Homepage load
         home = session.get("https://saveform.net/", headers=headers, timeout=10)
         soup = BeautifulSoup(home.text, "html.parser")
         
@@ -87,6 +101,7 @@ def fallback_saveform(url):
         if token:
             data["_token"] = token
         
+        # POST request bhejein
         response = session.post("https://saveform.net/", data=data, headers=headers, timeout=15)
         
         # Download link nikaalein
@@ -103,6 +118,7 @@ def fallback_saveform(url):
         print(f"Saveform error: {e}")
         return None
 
+# ---------- MAIN ENDPOINT ----------
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "alive", "message": "Use POST /fetch with { 'url': '...' }"})
@@ -114,20 +130,24 @@ def fetch():
         return jsonify({"success": False, "error": "URL nahi mila"}), 400
     
     user_url = data["url"]
-    
-    # 1. Check if it's a YouTube URL
     video_id = extract_youtube_video_id(user_url)
+    
+    # 1. YouTube
     if video_id:
         video_url = get_youtube_video_direct(video_id)
         if video_url:
             return jsonify({"success": True, "downloadUrl": video_url, "method": "YouTube Direct"})
+        else:
+            # Agar YouTube fail ho toh Instagram/TikTok ke liye try karein
+            pass
     
-    # 2. Agar YouTube nahi hai toh saveform.net try karein (Instagram, TikTok, Facebook)
-    video_url = fallback_saveform(user_url)
+    # 2. Saveform.net (Instagram, TikTok, Facebook)
+    video_url = scrape_saveform(user_url)
     if video_url:
         return jsonify({"success": True, "downloadUrl": video_url, "method": "saveform.net"})
     
     return jsonify({"success": False, "error": "Video nahi mili. Link check karein."}), 404
 
+# ---------- FOR LOCAL TESTING ----------
 if __name__ == "__main__":
     app.run(debug=True)
