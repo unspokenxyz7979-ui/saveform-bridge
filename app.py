@@ -8,6 +8,9 @@ import re
 app = Flask(__name__)
 CORS(app)
 
+# ============================================
+# YOUTUBE DOWNLOAD (yt-dlp)
+# ============================================
 def youtube_download(url):
     """yt-dlp se YouTube video nikaalein - 100% reliable"""
     try:
@@ -29,6 +32,9 @@ def youtube_download(url):
         print(f"yt-dlp error: {e}")
         return None
 
+# ============================================
+# SAVEFORM.NET (Instagram, TikTok, Facebook)
+# ============================================
 def scrape_saveform(url):
     """saveform.net se Instagram/TikTok/Facebook video nikaalein"""
     try:
@@ -69,6 +75,44 @@ def scrape_saveform(url):
         print(f"saveform error: {e}")
         return None
 
+# ============================================
+# FALLBACK: SNAPTIK API (TikTok, Instagram)
+# ============================================
+def scrape_snaptik(url):
+    try:
+        api_url = f"https://api.snaptik.app/video?url={url}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(api_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            video_url = data.get('video_url') or data.get('url') or data.get('data', {}).get('video_url')
+            if video_url:
+                return video_url
+        return None
+    except Exception as e:
+        print(f"snaptik error: {e}")
+        return None
+
+# ============================================
+# FALLBACK: VEVEIOZ API (YouTube, Instagram, Facebook)
+# ============================================
+def scrape_vevioz(url):
+    try:
+        api_url = f"https://api.vevioz.com/api/button/mp4/{url}"
+        response = requests.get(api_url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            video_url = data.get('video') or data.get('url')
+            if video_url:
+                return video_url
+        return None
+    except Exception as e:
+        print(f"vevioz error: {e}")
+        return None
+
+# ============================================
+# MAIN ENDPOINTS
+# ============================================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -84,7 +128,7 @@ def fetch():
     
     user_url = data["url"].strip()
     
-    # 1. YouTube
+    # ---------- METHOD 1: YOUTUBE ----------
     if 'youtube.com' in user_url or 'youtu.be' in user_url:
         video_url = youtube_download(user_url)
         if video_url:
@@ -94,7 +138,7 @@ def fetch():
                 "method": "yt-dlp"
             })
     
-    # 2. Instagram, TikTok, Facebook (saveform.net)
+    # ---------- METHOD 2: SAVEFORM.NET (Instagram, TikTok, Facebook) ----------
     video_url = scrape_saveform(user_url)
     if video_url:
         return jsonify({
@@ -103,7 +147,25 @@ def fetch():
             "method": "saveform.net"
         })
     
-    # 3. Agar kuch na mile
+    # ---------- METHOD 3: SNAPTIK (TikTok, Instagram) ----------
+    video_url = scrape_snaptik(user_url)
+    if video_url:
+        return jsonify({
+            "success": True,
+            "downloadUrl": video_url,
+            "method": "Snaptik API"
+        })
+    
+    # ---------- METHOD 4: VEVEIOZ (YouTube, Instagram, Facebook) ----------
+    video_url = scrape_vevioz(user_url)
+    if video_url:
+        return jsonify({
+            "success": True,
+            "downloadUrl": video_url,
+            "method": "Vevioz API"
+        })
+    
+    # ---------- ALL METHODS FAILED ----------
     return jsonify({
         "success": False,
         "error": "Video nahi mili. Link check karein."
