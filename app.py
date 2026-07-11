@@ -1,51 +1,82 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import yt_dlp
 import requests
-from bs4 import BeautifulSoup
 import re
+import json
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 CORS(app)
 
 # ============================================
-# YOUTUBE DOWNLOAD (yt-dlp)
+# YOUTUBE DIRECT (Scraping - No yt-dlp)
 # ============================================
-def youtube_download(url):
-    """yt-dlp se YouTube video nikaalein - 100% reliable"""
+def extract_youtube_id(url):
+    patterns = [
+        r'(?:youtube\.com\/watch\?v=)([\w-]+)',
+        r'(?:youtu\.be\/)([\w-]+)',
+        r'(?:youtube\.com\/shorts\/)([\w-]+)',
+        r'(?:youtube\.com\/embed\/)([\w-]+)'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_youtube_video(video_id):
     try:
-        ydl_opts = {
-            'format': 'best',
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            video_url = info.get('url')
-            if not video_url:
-                formats = info.get('formats', [])
-                if formats:
-                    video_url = formats[-1].get('url')
-            return video_url
+        
+        player_url = f"https://www.youtube.com/watch?v={video_id}"
+        response = requests.get(player_url, headers=headers, timeout=15)
+        
+        # Method 1: ytInitialPlayerResponse
+        match = re.search(r'var ytInitialPlayerResponse = ({.*?});', response.text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            streaming = data.get('streamingData', {})
+            formats = streaming.get('formats', []) + streaming.get('adaptiveFormats', [])
+            
+            best_url = None
+            best_quality = 0
+            for fmt in formats:
+                if 'url' in fmt:
+                    quality = 0
+                    if fmt.get('qualityLabel'):
+                        q_str = fmt['qualityLabel'].replace('p', '').strip()
+                        if q_str.isdigit():
+                            quality = int(q_str)
+                    if quality > best_quality:
+                        best_quality = quality
+                        best_url = fmt['url']
+            if best_url:
+                return best_url
+        
+        # Method 2: Direct googlevideo URL
+        url_pattern = r'https?://[^"]+\.googlevideo\.com/[^"]+'
+        matches = re.findall(url_pattern, response.text)
+        if matches:
+            return max(matches, key=len)
+        
+        return None
     except Exception as e:
-        print(f"yt-dlp error: {e}")
+        print(f"YouTube error: {e}")
         return None
 
 # ============================================
 # SAVEFORM.NET (Instagram, TikTok, Facebook)
 # ============================================
 def scrape_saveform(url):
-    """saveform.net se Instagram/TikTok/Facebook video nikaalein"""
     try:
         session = requests.Session()
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         
-        # Homepage load (CSRF token ke liye)
         home = session.get("https://saveform.net/", headers=headers, timeout=10)
         soup = BeautifulSoup(home.text, "html.parser")
         
-        # CSRF token dhoondein
         token = None
         for inp in soup.find_all("input"):
             name = inp.get("name", "")
@@ -53,16 +84,13 @@ def scrape_saveform(url):
                 token = inp.get("value")
                 break
         
-        # Form data prepare karein
         data = {"url": url}
         if token:
             data["_token"] = token
         
-        # POST request bhejein
         response = session.post("https://saveform.net/", data=data, headers=headers, timeout=15)
         soup2 = BeautifulSoup(response.text, "html.parser")
         
-        # Download link dhoondein
         dl_link = soup2.find("a", {"id": "download-btn"}) or soup2.find("a", class_="download")
         if dl_link and dl_link.get("href"):
             return dl_link["href"]
@@ -76,25 +104,7 @@ def scrape_saveform(url):
         return None
 
 # ============================================
-# FALLBACK: SNAPTIK API (TikTok, Instagram)
-# ============================================
-def scrape_snaptik(url):
-    try:
-        api_url = f"https://api.snaptik.app/video?url={url}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(api_url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            video_url = data.get('video_url') or data.get('url') or data.get('data', {}).get('video_url')
-            if video_url:
-                return video_url
-        return None
-    except Exception as e:
-        print(f"snaptik error: {e}")
-        return None
-
-# ============================================
-# FALLBACK: VEVEIOZ API (YouTube, Instagram, Facebook)
+# FALLBACK: VEVEIOZ API
 # ============================================
 def scrape_vevioz(url):
     try:
@@ -129,13 +139,14 @@ def fetch():
     user_url = data["url"].strip()
     
     # ---------- METHOD 1: YOUTUBE ----------
-    if 'youtube.com' in user_url or 'youtu.be' in user_url:
-        video_url = youtube_download(user_url)
+    video_id = extract_youtube_id(user_url)
+    if video_id:
+        video_url = get_youtube_video(video_id)
         if video_url:
             return jsonify({
                 "success": True,
                 "downloadUrl": video_url,
-                "method": "yt-dlp"
+                "method": "YouTube Direct"
             })
     
     # ---------- METHOD 2: SAVEFORM.NET (Instagram, TikTok, Facebook) ----------
@@ -147,16 +158,7 @@ def fetch():
             "method": "saveform.net"
         })
     
-    # ---------- METHOD 3: SNAPTIK (TikTok, Instagram) ----------
-    video_url = scrape_snaptik(user_url)
-    if video_url:
-        return jsonify({
-            "success": True,
-            "downloadUrl": video_url,
-            "method": "Snaptik API"
-        })
-    
-    # ---------- METHOD 4: VEVEIOZ (YouTube, Instagram, Facebook) ----------
+    # ---------- METHOD 3: VEVEIOZ (Backup) ----------
     video_url = scrape_vevioz(user_url)
     if video_url:
         return jsonify({
